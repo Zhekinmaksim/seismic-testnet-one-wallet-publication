@@ -2,6 +2,8 @@
 
 This guide shows how to turn one funded Seismic wallet into a complete, publishable testnet run.
 
+The earlier version of this guide described the flow at a high level. This version makes the deployment path explicit, with the exact project structure and `sforge create` pattern used in the working run.
+
 ## Goal
 
 Use one wallet to do more than deploy a contract. The target is a full Seismic flow that includes:
@@ -27,35 +29,325 @@ The wallet should have enough testnet funds for:
 - viewing key registration
 - follow-up verification reads
 
-## Step 2: Give The Run A Distinct Profile
+## Step 2: Prepare Your Environment
 
-Avoid making the run look like a generic copy of the same demo contracts.
+You need:
 
-Reference profile:
+- Seismic Foundry with `sforge`
+- a funded private key
+- the Seismic testnet RPC
 
-- Counter label: `Seismic Counter acct-001`
-- Counter variantId: `1001`
-- Token name: `Seismic Test Token acct-001`
-- Token symbol: `S001`
-- Token variantId: `2001`
-- Walnut label: `Seismic Walnut acct-001`
-- Walnut variantId: `3001`
+Reference RPC:
 
-## Step 3: Deploy Three Contracts
+`https://gcp-1.seismictest.net/rpc`
 
-Deploy:
+Reference chain ID:
 
-1. `Counter`
-2. `Private Token`
-3. `Walnut`
+`5124`
 
-Reference deployment addresses:
+Export the two values you will use during deployment:
+
+```bash
+export RPC_URL="https://gcp-1.seismictest.net/rpc"
+export PRIVATE_KEY="0xYOUR_PRIVATE_KEY"
+```
+
+Before deploying anything, verify that the RPC answers:
+
+```bash
+curl -sS -X POST "$RPC_URL" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'
+```
+
+You should get:
+
+```json
+{"jsonrpc":"2.0","id":1,"result":"0x1404"}
+```
+
+`0x1404` is `5124` in decimal.
+
+## Step 3: Create A Minimal Seismic Foundry Project
+
+Make a fresh working directory:
+
+```bash
+mkdir -p seismic-one-wallet-flow/src
+cd seismic-one-wallet-flow
+```
+
+Create `foundry.toml`:
+
+```toml
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+```
+
+This is enough for a minimal Seismic Foundry build.
+
+## Step 4: Add The Counter Contract
+
+Create `src/Counter.sol`:
+
+```solidity
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.13;
+
+contract Counter {
+    suint256 private number;
+    uint256 public threshold;
+    string public label;
+
+    constructor(uint256 _threshold, string memory _label) {
+        number = suint256(0);
+        threshold = _threshold;
+        label = _label;
+    }
+
+    function increment(suint256 amount) public {
+        number += amount;
+    }
+
+    function getNumber() public view isThresholdReached returns (uint256) {
+        return uint256(number);
+    }
+
+    modifier isThresholdReached() {
+        require(number >= suint256(threshold), "Threshold not reached");
+        _;
+    }
+}
+```
+
+### Important
+
+The constructor takes **two** arguments:
+
+1. `threshold`
+2. `label`
+
+That is why the deployment command later uses:
+
+```bash
+--constructor-args "5" "Seismic Counter acct-001"
+```
+
+## Step 5: Build Before You Deploy
+
+Compile first:
+
+```bash
+sforge build
+```
+
+If the build succeeds, you are ready to deploy.
+
+## Step 6: Deploy Counter
+
+Deploy `Counter` with the same pattern used in the working Seismic run:
+
+```bash
+sforge create \
+  --rpc-url "$RPC_URL" \
+  --private-key "$PRIVATE_KEY" \
+  --broadcast \
+  src/Counter.sol:Counter \
+  --constructor-args "5" "Seismic Counter acct-001"
+```
+
+What each part does:
+
+- `--rpc-url`: points to Seismic testnet
+- `--private-key`: signs the deployment transaction
+- `--broadcast`: sends the transaction onchain instead of simulating it
+- `src/Counter.sol:Counter`: tells `sforge` which contract to deploy
+- `--constructor-args`: passes the constructor arguments in order
+
+### What success looks like
+
+The output should include lines like:
+
+```text
+Deployer: 0x...
+Deployed to: 0x...
+Transaction hash: 0x...
+```
+
+The important value is the one after `Deployed to:`. Save it. That is your deployed Counter contract address.
+
+## Step 7: Deploy The Private Token Contract
+
+In the working flow, the token contract was a lightweight private token used for balance checks and transfers.
+
+Create `src/MiniSRC20.sol`:
+
+```solidity
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.13;
+
+contract MiniSRC20 {
+    string public name;
+    string public symbol;
+    uint8 public decimals;
+
+    mapping(address => suint256) private balances;
+
+    constructor(
+        string memory _name,
+        string memory _symbol,
+        uint8 _decimals,
+        uint256 initialSupply
+    ) {
+        name = _name;
+        symbol = _symbol;
+        decimals = _decimals;
+        balances[msg.sender] = suint256(initialSupply);
+    }
+
+    function balanceOf() public view returns (uint256) {
+        return uint256(balances[msg.sender]);
+    }
+
+    function transfer(address to, suint256 amount) public returns (bool) {
+        require(balances[msg.sender] >= amount, "Insufficient balance");
+        balances[msg.sender] -= amount;
+        balances[to] += amount;
+        return true;
+    }
+}
+```
+
+Compile again:
+
+```bash
+sforge build
+```
+
+Then deploy:
+
+```bash
+sforge create \
+  --rpc-url "$RPC_URL" \
+  --private-key "$PRIVATE_KEY" \
+  --broadcast \
+  src/MiniSRC20.sol:MiniSRC20 \
+  --constructor-args \
+  "Seismic Test Token acct-001" \
+  "S001" \
+  "18" \
+  "1017"
+```
+
+Constructor arguments here are:
+
+1. token name
+2. token symbol
+3. decimals
+4. initial supply
+
+Again, save the address printed after `Deployed to:`.
+
+## Step 8: Deploy Walnut
+
+`Walnut` is the contract used to exercise more interesting private logic.
+
+Create `src/Walnut.sol`:
+
+```solidity
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.13;
+
+contract Walnut {
+    suint256 private number;
+    uint256 public shell;
+    uint256 public round;
+    string public label;
+    mapping(uint256 => mapping(address => uint256)) private hitsPerRound;
+
+    constructor(uint256 startNumber, uint256 initialShell, string memory _label) {
+        number = suint256(startNumber);
+        shell = initialShell;
+        round = 1;
+        label = _label;
+    }
+
+    function shake(suint256 numShakes) public {
+        number += numShakes;
+    }
+
+    function hit() public {
+        hitsPerRound[round][msg.sender] += 1;
+        if (shell > 0) {
+            shell -= 1;
+        }
+    }
+
+    function look() public view onlyContributor returns (uint256) {
+        return uint256(number);
+    }
+
+    function reset(uint256 newNumber, uint256 newShell) public {
+        round += 1;
+        number = suint256(newNumber);
+        shell = newShell;
+    }
+
+    function contributions(address user) public view returns (uint256) {
+        return hitsPerRound[round][user];
+    }
+
+    modifier onlyContributor() {
+        require(hitsPerRound[round][msg.sender] > 0, "Not a contributor");
+        _;
+    }
+}
+```
+
+Build again:
+
+```bash
+sforge build
+```
+
+Then deploy:
+
+```bash
+sforge create \
+  --rpc-url "$RPC_URL" \
+  --private-key "$PRIVATE_KEY" \
+  --broadcast \
+  src/Walnut.sol:Walnut \
+  --constructor-args "12" "1" "Seismic Walnut acct-001"
+```
+
+Constructor arguments here are:
+
+1. start number
+2. initial shell
+3. label
+
+Save the `Deployed to:` address.
+
+## Step 9: What You Should Have After Deployment
+
+At this point you should have three deployed addresses:
+
+- Counter
+- Private Token
+- Walnut
+
+In the reference run, those addresses were:
 
 - Counter: `0xBc82Be737749F33c32e33097C7BdB3F0804050c1`
 - Private Token: `0x67827B110781D3936B782ffC34fbdb9e5073EB5D`
 - Walnut: `0xAc283F36B1879b795859106D13498eCB3Eb43ff8`
 
-## Step 4: Run The Counter Flow
+If you do not have all three addresses yet, stop here and fix deployment first. The rest of the guide assumes deployment is already complete.
+
+## Step 10: Run The Counter Flow
 
 Use the deployed `Counter` contract to verify the basic private interaction path.
 
@@ -70,7 +362,7 @@ Reference result:
 - First increment tx: `0x03de83ffeed73399fd70d34921bcc70cfeb3859b17a607801faef443198fcb54`
 - Final value: `5`
 
-## Step 5: Run The Private Token Flow
+## Step 11: Run The Private Token Flow
 
 Use the private token contract for a real balance change, not just deployment.
 
@@ -87,7 +379,7 @@ Reference result:
 - Final balance: `1011`
 - Transfer tx: `0xe8d0901d47222325471b6d58cbddcd0e7f7c8b12653e99ec3d248b244a01a0d0`
 
-## Step 6: Run The Walnut Flow
+## Step 12: Run The Walnut Flow
 
 Use `Walnut` to show that private conditional logic also works.
 
@@ -103,7 +395,7 @@ Reference result:
 
 - Final Walnut signed read: `16`
 
-## Step 7: Register A Directory Viewing Key
+## Step 13: Register A Directory Viewing Key
 
 This validates account-level privacy infrastructure, not just contract logic.
 
@@ -111,7 +403,7 @@ Reference transaction:
 
 - Viewing key registration: `0xbe5fe0fc03eebc81847a78eb599911aec80ec306f2e5435ca717ccd4d35b5c53`
 
-## Step 8: Check Mercury Precompiles
+## Step 14: Check Mercury Precompiles
 
 Verify the lower-level cryptographic path in the same run.
 
@@ -122,7 +414,7 @@ Check:
 - AES-GCM roundtrip
 - secp256k1 signing
 
-## Step 9: Record Final Outputs
+## Step 15: Record Final Outputs
 
 At the end, keep one clean result set:
 
